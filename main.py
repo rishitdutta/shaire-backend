@@ -15,7 +15,7 @@ app = FastAPI()
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 if not GEMINI_API_KEY:
     raise ValueError("GEMINI_API_KEY environment variable is not set.")
-client = genai.configure(api_key=GEMINI_API_KEY)
+client = genai.Client(api_key=GEMINI_API_KEY)
 
 def extract_bill_info_gemini(image_array):
     if image_array is None:
@@ -66,17 +66,15 @@ def extract_bill_info_gemini(image_array):
         # Convert the image to bytes
         image_bytes = cv2.imencode(".png", image_array)[1].tobytes()
         
-        # Create a GenerativeModel instance
-        model = genai.GenerativeModel('gemini-pro-vision')
+        # Use the proper Part helper method
+        image_part = types.Part.from_bytes(data=image_bytes, mime_type="image/png")
         
-        # Create image part
-        image_part = {
-            "mime_type": "image/png",
-            "data": image_bytes
-        }
-        
-        # Generate content
-        response = model.generate_content([prompt, image_part])
+        # Send as contents array
+        response = client.models.generate_content(
+            model="gemini-2.0-flash",
+            contents=[prompt, image_part]
+        )
+        #response = model.generate_content([prompt, image_part])
         
         json_string = response.text
         
@@ -124,14 +122,16 @@ async def extract_bill(image: UploadFile = File(...)):
         print(f"Error: {str(e)}")  # Log error for debugging
         raise HTTPException(status_code=500, detail=f"Internal Server Error: {str(e)}")
 
-@app.get("/health")
+@app.get('/health')
 def health_check():
     try:
-        # Check external service availability
-        model = genai.GenerativeModel('gemini-pro-vision')
+        client.models.get(model="gemini-2.0-flash")
         return {"status": "healthy", "message": "Server is running"}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Unhealthy: {str(e)}")
+        return JSONResponse(
+            status_code=500,
+            content={"status": "unhealthy", "error": str(e)}
+        )
 
 @app.get("/test")
 def test_endpoint():
