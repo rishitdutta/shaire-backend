@@ -17,6 +17,8 @@ import io
 from fastapi import Body
 from pydantic import BaseModel
 from typing import List, Optional
+from sklearn.preprocessing import OneHotEncoder
+from sklearn.linear_model import ElasticNet
 
 # Update app metadata for Swagger docs
 app = FastAPI(
