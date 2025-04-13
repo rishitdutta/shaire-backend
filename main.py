@@ -2,7 +2,7 @@ from fastapi import FastAPI, File, UploadFile, HTTPException
 from fastapi.responses import JSONResponse
 from google import genai
 from google.genai import types
-import cv2
+#import cv2
 import json
 import os
 import re
@@ -81,7 +81,9 @@ def extract_bill_info_gemini(image_array):
         """
         
         # Convert the image to bytes
-        image_bytes = cv2.imencode(".png", image_array)[1].tobytes()
+        img_byte_arr = io.BytesIO()
+        Image.fromarray(image_array).save(img_byte_arr, format='PNG')
+        image_bytes = img_byte_arr.getvalue()
         
         # Use the proper Part helper method
         image_part = types.Part.from_bytes(data=image_bytes, mime_type="image/png")
@@ -124,8 +126,8 @@ async def extract_bill(image: UploadFile = File(...)):
     try:
         # Read the image
         img_bytes = await image.read()
-        nparr = np.frombuffer(img_bytes, np.uint8)
-        img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+        img = Image.open(io.BytesIO(img_bytes))
+        img_array = np.array(img)
         
         if img is None:
             raise HTTPException(status_code=400, detail="Invalid image")
