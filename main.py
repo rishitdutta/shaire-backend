@@ -9,8 +9,25 @@ import re
 import numpy as np
 from PIL import Image
 import uvicorn
+import pandas as pd
+import dill
+from datetime import datetime, timedelta
+from calendar import monthrange
+import io
+from fastapi import Body
+from pydantic import BaseModel
+from typing import List, Optional
 
-app = FastAPI()
+# Update app metadata for Swagger docs
+app = FastAPI(
+    title="Shaire Backend API",
+    description="API for bill extraction and spending prediction",
+    version="1.0.0",
+    docs_url="/docs",
+    redoc_url="/redoc"
+)
+
+# Bill Extraction
 
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 if not GEMINI_API_KEY:
@@ -167,6 +184,188 @@ def test_endpoint():
             }
         ]
     }
+
+# Expense Prediction
+
+class Transaction(BaseModel):
+    date: str
+    amount: float
+    
+class PredictionRequest(BaseModel):
+    transactions: List[Transaction]
+    prediction_days: Optional[int] = 30
+    
+class SimplePredictionRequest(BaseModel):
+    avg_spending: float
+    prediction_days: Optional[int] = 30
+    
+class DailyPrediction(BaseModel):
+    date: str
+    predicted_amount: float
+    
+class PredictionResponse(BaseModel):
+    total_predicted_spending: float
+    average_daily_spending: float
+    daily_predictions: List[DailyPrediction]
+
+def get_model_path(filename):
+    """Returns absolute path to model file"""
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    return os.path.join(base_dir, "models", filename)
+
+def load_prediction_models():
+    """Load preprocessing and prediction models"""
+    try:
+        with open(get_model_path("preprocessing.pkl"), "rb") as f:
+            preprocessing = dill.load(f)
+            
+        with open(get_model_path("training_prediction.pkl"), "rb") as f:
+            prediction_model = dill.load(f)
+            
+        return preprocessing, prediction_model
+    except FileNotFoundError as e:
+        print(f"Model file not found: {str(e)}")
+        raise Exception(f"Model file not found: {str(e)}")
+    except Exception as e:
+        print(f"Error loading models: {str(e)}")
+        raise Exception(f"Error loading models: {str(e)}")
+    
+
+@app.post("/predict_spending", response_model=PredictionResponse)
+async def predict_spending(request: PredictionRequest):
+    try:
+        # Convert transactions to DataFrame
+        df = pd.DataFrame([{"date": t.date, "price": t.amount} for t in request.transactions])
+        
+        # Load models
+        prep, train_pred = load_prediction_models()
+        
+        # Preprocess data
+        df, old_mean, new_mean = prep.preprocess(df)
+        
+        # Generate predictions
+        each_day_prediction, total_spending, avg_spent = train_pred.traintest(df)
+        
+        # Format response
+        prediction_days = min(request.prediction_days, len(each_day_prediction))
+        
+        daily_predictions = []
+        for i in range(prediction_days):
+            day_date = (datetime.now() + timedelta(days=i)).strftime("%Y-%m-%d")
+            daily_predictions.append({
+                "date": day_date,
+                "predicted_amount": float(each_day_prediction[i])
+            })
+        
+        return {
+            "total_predicted_spending": float(total_spending[0]),
+            "average_daily_spending": float(avg_spent[0]),
+            "daily_predictions": daily_predictions
+        }
+        
+    except Exception as e:
+        print(f"Error: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Prediction error: {str(e)}")
+
+@app.post("/predict_spending_simple", response_model=PredictionResponse)
+async def predict_spending_simple(request: SimplePredictionRequest):
+    try:
+        # Generate synthetic data based on provided average
+        synthetic_data = []
+        base_date = datetime.now() - timedelta(days=30)
+        
+        for i in range(10):
+            days_ago = 30 - 3*i
+            # Create realistic variation in spending
+            amount = request.avg_spending * (0.7 + 0.6 * np.random.random())
+            synthetic_data.append({
+                'date': (base_date + timedelta(days=days_ago)).strftime('%b %d, %Y'),
+                'price': amount
+            })
+            
+        df = pd.DataFrame(synthetic_data)
+        
+        # Load models
+        prep, train_pred = load_prediction_models()
+        
+        # Process and predict
+        df, old_mean, new_mean = prep.preprocess(df)
+        each_day_prediction, total_spending, avg_spent = train_pred.traintest(df)
+        
+        # Format response
+        prediction_days = min(request.prediction_days, len(each_day_prediction))
+        
+        daily_predictions = []
+        for i in range(prediction_days):
+            day_date = (datetime.now() + timedelta(days=i)).strftime("%Y-%m-%d")
+            daily_predictions.append({
+                "date": day_date,
+                "predicted_amount": float(each_day_prediction[i])
+            })
+        
+        return {
+            "total_predicted_spending": float(total_spending[0]),
+            "average_daily_spending": float(avg_spent[0]),
+            "daily_predictions": daily_predictions
+        }
+        
+    except Exception as e:
+        print(f"Error: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Prediction error: {str(e)}")
+
+@app.post("/predict_from_csv")
+async def predict_from_csv(csv_file: UploadFile = File(...)):
+    try:
+        # Read CSV file
+        contents = await csv_file.read()
+        df = pd.read_csv(io.StringIO(contents.decode('utf-8')))
+        
+        # Ensure required columns exist and handle column naming
+        if 'date' not in df.columns and 'Date' in df.columns:
+            df = df.rename(columns={'Date': 'date'})
+            
+        if 'amount' not in df.columns and 'price' not in df.columns:
+            if 'Amount' in df.columns:
+                df = df.rename(columns={'Amount': 'price'})
+            elif 'Price' in df.columns:
+                df = df.rename(columns={'Price': 'price'})
+            else:
+                raise HTTPException(
+                    status_code=400, 
+                    detail="CSV must include either 'date' and 'amount' or 'date' and 'price' columns"
+                )
+        elif 'amount' in df.columns and 'price' not in df.columns:
+            df = df.rename(columns={'amount': 'price'})
+        
+        # Load models
+        prep, train_pred = load_prediction_models()
+        
+        # Preprocess data
+        df, old_mean, new_mean = prep.preprocess(df)
+        
+        # Generate predictions
+        each_day_prediction, total_spending, avg_spent = train_pred.traintest(df)
+        
+        # Format response
+        prediction_days = 30
+        
+        daily_predictions = []
+        for i in range(prediction_days):
+            day_date = (datetime.now() + timedelta(days=i)).strftime("%Y-%m-%d")
+            daily_predictions.append({
+                "date": day_date,
+                "predicted_amount": float(each_day_prediction[i]) if i < len(each_day_prediction) else 0.0
+            })
+        
+        return {
+            "total_predicted_spending": float(total_spending[0]),
+            "average_daily_spending": float(avg_spent[0]),
+            "daily_predictions": daily_predictions
+        }
+        
+    except Exception as e:
+        print(f"Error: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Prediction error: {str(e)}")
 
 if __name__ == "__main__":
     uvicorn.run("main:app", host="0.0.0.0", port=int(os.environ.get("PORT", 8000)))
