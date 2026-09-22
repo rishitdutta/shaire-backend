@@ -70,8 +70,9 @@ def extract_bill_info_gemini(image_array):
         image_part = types.Part.from_bytes(data=image_bytes, mime_type="image/png")
         
         # Send as contents array
+        model_name = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
         response = client.models.generate_content(
-            model="gemini-2.0-flash",
+            model=model_name,
             contents=[prompt, image_part]
         )
         #response = model.generate_content([prompt, image_part])
@@ -83,7 +84,8 @@ def extract_bill_info_gemini(image_array):
             return data
         except json.JSONDecodeError:
             # Cleanup and try again
-            json_string = re.sub(r"``````", "", json_string).strip()
+            json_string = re.sub(r"```json\s*", "", json_string)
+            json_string = re.sub(r"```", "", json_string).strip()
             json_match = re.search(r"\{.*\}", json_string, re.DOTALL)
             
             if json_match:
@@ -115,9 +117,13 @@ async def extract_bill(image: UploadFile = File(...)):
         
         # Process the image
         result = extract_bill_info_gemini(img)
+        if "error" in result:
+            return JSONResponse(status_code=500, content=result)
         
         return result
     
+    except HTTPException:
+        raise
     except Exception as e:
         print(f"Error: {str(e)}")  # Log error for debugging
         raise HTTPException(status_code=500, detail=f"Internal Server Error: {str(e)}")
@@ -125,7 +131,8 @@ async def extract_bill(image: UploadFile = File(...)):
 @app.get('/health')
 def health_check():
     try:
-        client.models.get(model="gemini-2.0-flash")
+        model_name = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
+        client.models.get(model=model_name)
         return {"status": "healthy", "message": "Server is running"}
     except Exception as e:
         return JSONResponse(
